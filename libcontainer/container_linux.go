@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -272,8 +273,8 @@ func awaitProcessExit(pid int, exit <-chan struct{}) <-chan struct{} {
 			case <-exit:
 				return
 			case <-time.After(time.Millisecond * 100):
-				stat, err := system.Stat(pid)
-				if err != nil || stat.State == system.Zombie {
+				// if process became zombie, signal death
+				if state, err := pidState(pid); err != nil || state == 'Z' {
 					close(isDead)
 					return
 				}
@@ -1620,4 +1621,42 @@ func (c *linuxContainer) bootstrapData(cloneFlags uintptr, nsMaps map[configs.Na
 	})
 
 	return bytes.NewReader(r.Serialize()), nil
+}
+
+// pidState returns the state code as specified in /proc/$pid/stat
+// This function was created only to backport https://github.com/opencontainers/runc/pull/1698
+// without having to also backport https://github.com/opencontainers/runc/pull/1489
+func pidState(pid int) (int, error) {
+	bytes, err := ioutil.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0, err
+	}
+
+	return parseState(string(bytes))
+}
+
+// parseState parses the state code from a string in the format of /proc/$pid/stat
+// This function was created only to backport https://github.com/opencontainers/runc/pull/1698
+// without having to also backport https://github.com/opencontainers/runc/pull/1489
+func parseState(data string) (int, error) {
+	// From proc(5), field 2 could contain space and is inside `(` and `)`.
+	// The following is an example:
+	// 89653 (gunicorn: maste) S 89630 89653 89653 0 -1 4194560 29689 28896 0 3 146 32 76 19 20 0 1 0 2971844 52965376 3920 18446744073709551615 1 1 0 0 0 0 0 16781312 137447943 0 0 0 17 1 0 0 0 0 0 0 0 0 0 0 0 0 0
+	i := strings.LastIndex(data, ")")
+	if i <= 2 || i >= len(data)-1 {
+		return 0, fmt.Errorf("invalid stat data: %q", data)
+	}
+
+	parts := strings.SplitN(data[:i], "(", 2)
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid stat data: %q", data)
+	}
+
+	// parts indexes should be offset by 3 from the field number given
+	// proc(5), because parts is zero-indexed and we've removed fields
+	// one (PID) and two (Name) in the paren-split.
+	parts = strings.SplitN(data[i+2:], " ", 2)
+	var state int
+	fmt.Sscanf(parts[3-3], "%c", &state)
+	return state, nil
 }
