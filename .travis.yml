@@ -4,6 +4,8 @@ go:
   - 1.8.x
   - tip
 
+go_import_path: github.com/opencontainers/runc
+
 matrix:
   allow_failures:
     - go: tip
